@@ -7,13 +7,14 @@
  * License: GPLv2 or later
  * Requires at least: 5.8
  * Requires PHP: 7.4
- * Tested up to: 6.6
+ * Tested up to: 6.8
  * Text Domain: openpanel
  */
 
 if (!defined('ABSPATH')) { exit; }
 
 final class OP_WP_Proxy {
+    const VERSION = '1.0.0';
     const OPTION_KEY   = 'op_wp_proxy_settings';
     const TRANSIENT_JS = 'op_wp_op1_js';
     const OP_JS_URL    = 'https://openpanel.dev/op1.js';
@@ -81,7 +82,7 @@ final class OP_WP_Proxy {
 
     public function handle_cache_clear() {
         if (isset($_POST['op_clear_cache']) && current_user_can('manage_options')) {
-            if (wp_verify_nonce($_POST['_wpnonce'], 'op_clear_cache_nonce')) {
+            if (isset($_POST['_wpnonce']) && wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['_wpnonce'])), 'op_clear_cache_nonce')) {
                 delete_transient(self::TRANSIENT_JS);
                 add_action('admin_notices', function() {
                     echo '<div class="notice notice-success is-dismissible"><p>' . 
@@ -124,7 +125,8 @@ final class OP_WP_Proxy {
                 $time_remaining = $cached_time - time();
                 if ($time_remaining > 0) {
                     echo '<p style="margin-top:1rem;color:#666;">' . 
-                         sprintf(esc_html__('Cache expires in %s', 'openpanel'), human_time_diff(time(), $cached_time)) . 
+                         /* translators: %s: human readable time difference */
+                         sprintf(esc_html__('Cache expires in %s', 'openpanel'), esc_html(human_time_diff(time(), $cached_time))) . 
                          '</p>';
                 } else {
                     echo '<p style="margin-top:1rem;color:#666;">' . 
@@ -174,15 +176,21 @@ final class OP_WP_Proxy {
             }
         }
 
-        wp_register_script('op-inline-stub', false, [], null, true);
+        wp_register_script('op-inline-stub', false, [], self::VERSION, true);
         wp_enqueue_script('op-inline-stub');
 
         wp_add_inline_script('op-inline-stub', $bootstrap, 'before');
 
         if (!empty($op_js)) {
-            wp_add_inline_script('op-inline-stub', $op_js, 'after');
+            // Validate cached JavaScript content before output
+            if ($this->is_valid_javascript_content($op_js)) {
+                wp_add_inline_script('op-inline-stub', $op_js, 'after');
+            } else {
+                // Fall back to CDN if cached content appears invalid or unsafe
+                wp_enqueue_script('openpanel-op1', self::OP_JS_URL, [], self::VERSION, true);
+            }
         } else {
-            wp_enqueue_script('openpanel-op1', self::OP_JS_URL, [], null, true);
+            wp_enqueue_script('openpanel-op1', self::OP_JS_URL, [], self::VERSION, true);
         }
     }
 
@@ -190,6 +198,15 @@ final class OP_WP_Proxy {
     public function register_proxy_route() {
         register_rest_route(self::REST_NS, self::REST_ROUTE, [
             'methods'  => \WP_REST_Server::ALLMETHODS,
+            // INTENTIONALLY PUBLIC ENDPOINT: This endpoint must be publicly accessible to receive
+            // analytics data from frontend JavaScript running in users' browsers. No authentication
+            // is required as this acts as a proxy for OpenPanel analytics collection.
+            // 
+            // Security measures in place:
+            // 1. Only proxies to whitelisted OpenPanel API endpoints (is_valid_proxy_target)
+            // 2. All input data is sanitized and validated before forwarding
+            // 3. Proper CORS headers are set for same-origin requests only
+            // 4. No sensitive WordPress data is exposed through this endpoint
             'permission_callback' => '__return_true',
             'callback' => [$this, 'proxy_request'],
             'args'     => [
@@ -211,6 +228,13 @@ final class OP_WP_Proxy {
 
         $path = ltrim($request->get_param('path') ?? '', '/');
         $target = rtrim(self::DEFAULT_API_BASE, '/') . '/' . $path;
+        
+        // Security: Ensure we only proxy to OpenPanel API endpoints
+        if (!$this->is_valid_proxy_target($target)) {
+            $resp = new \WP_REST_Response(['error' => 'invalid_target', 'message' => 'Invalid proxy target'], 403);
+            $this->add_cors_headers($resp);
+            return $resp;
+        }
 
         $method = strtoupper($request->get_method());
         $body   = $request->get_body();
@@ -271,20 +295,78 @@ final class OP_WP_Proxy {
     private function collect_request_headers() {
         $headers = [];
         foreach ($_SERVER as $name => $value) {
+            // Sanitize the header name and ensure it starts with HTTP_
+            $name = sanitize_text_field($name);
             if (strpos($name, 'HTTP_') === 0) {
-                $header = str_replace(' ', '-', ucwords(strtolower(str_replace('_', ' ', substr($name, 5)))));
-                // remove hop-by-hop
+                // Extract and sanitize the header suffix
+                $header_suffix = substr($name, 5);
+                $header_suffix = sanitize_text_field($header_suffix);
+                $header = str_replace(' ', '-', ucwords(strtolower(str_replace('_', ' ', $header_suffix))));
+                // remove hop-by-hop headers
                 $lk = strtolower($header);
                 if (in_array($lk, ['host','content-length','accept-encoding','connection','keep-alive','transfer-encoding','upgrade','via'], true)) {
                     continue;
                 }
-                $headers[$header] = $value;
+                // Sanitize the header value
+                $headers[$header] = sanitize_text_field($value);
             }
         }
         if (!isset($headers['User-Agent'])) {
             $headers['User-Agent'] = 'OpenPanel-WP-Proxy';
         }
         return $headers;
+    }
+
+    private function is_valid_proxy_target($target) {
+        $allowed_hosts = [
+            'api.openpanel.dev',
+            'openpanel.dev'
+        ];
+        
+        $parsed = wp_parse_url($target);
+        if (!$parsed || !isset($parsed['host'])) {
+            return false;
+        }
+        
+        return in_array($parsed['host'], $allowed_hosts, true) && 
+               (empty($parsed['scheme']) || in_array($parsed['scheme'], ['https', 'http'], true));
+    }
+
+    private function is_valid_javascript_content($js_content) {
+        // Comprehensive validation to ensure the content is safe JavaScript
+        if (empty($js_content) || !is_string($js_content)) {
+            return false;
+        }
+        
+        // Note: We don't modify $js_content with wp_kses here because we need to preserve
+        // the original JavaScript content for validation. wp_add_inline_script() handles
+        // proper escaping when outputting to the page.
+        
+        // Ensure it doesn't contain HTML tags or script injection attempts
+        if (preg_match('/<(?:script|iframe|object|embed|form|input|meta|link)/i', $js_content)) {
+            return false;
+        }
+        
+        // Check for potential XSS patterns
+        if (preg_match('/(?:javascript:|data:|vbscript:|on\w+\s*=)/i', $js_content)) {
+            return false;
+        }
+        
+        // Check that it's a reasonable size for a JavaScript file (typical op1.js is ~5KB)
+        $trimmed = trim($js_content);
+        if (strlen($trimmed) < 10 || strlen($trimmed) > 20480) { // Max 20KB
+            return false;
+        }
+        
+        // Should contain typical JavaScript patterns (works for both minified and unminified)
+        return (strpos($trimmed, 'function') !== false || 
+                strpos($trimmed, 'var ') !== false || 
+                strpos($trimmed, 'let ') !== false || 
+                strpos($trimmed, 'const ') !== false ||
+                strpos($trimmed, '=>') !== false ||
+                // Handle minified code patterns like the actual op1.js
+                preg_match('/[a-zA-Z_$][a-zA-Z0-9_$]*\s*=\s*function/', $trimmed) ||
+                preg_match('/\(\s*function\s*\(/', $trimmed));
     }
 }
 

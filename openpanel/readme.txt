@@ -1,8 +1,8 @@
 === OpenPanel ===
 Contributors: openpanel
-Tags: analytics, web analytics, product analytics, privacy-friendly, tracking, proxy, ad-blocker resistant
+Tags: analytics, web analytics, privacy-friendly, tracking, proxy
 Requires at least: 5.8
-Tested up to: 6.6
+Tested up to: 6.8
 Requires PHP: 7.4
 Stable tag: 1.0.0
 License: GPLv2 or later
@@ -111,10 +111,35 @@ No! OpenPanel uses cookie-less tracking technology, which means no cookies are s
 = Where can I get support? =
 For plugin-specific issues, use the WordPress plugin support forum. For OpenPanel platform questions, visit [OpenPanel.dev](https://openpanel.dev) or their community channels.
 
-== Screenshots ==
+== External Services ==
 
-1. Settings screen with Client ID configuration and auto-tracking toggles
-2. Cache management interface showing current cache status and clear options
+This plugin connects to external OpenPanel.dev services to provide web analytics functionality. Here's what you need to know:
+
+**OpenPanel.dev Analytics Service**
+
+* **What it is**: OpenPanel.dev is an open-source web and product analytics platform that combines the power of Mixpanel with the ease of Plausible and one of the best Google Analytics replacements.
+
+* **What data is sent**: 
+  - **User Agent**: Browser and device information for compatibility and analytics
+  - **IP Address**: Collected from X-Forwarded-For header for geolocation (no personal identification)
+  - **Page Information**: Current page URL/path and referrer information
+  - **Event Data**: Other user-defined properties when custom events are triggered via `window.op('track', 'event_name')`
+
+* **When data is sent**: 
+  - **Page Views**: Only when "Track page views automatically" is enabled in settings
+  - **Outgoing Link Clicks**: Only when "Track clicks on outgoing links" is enabled in settings  
+  - **Custom Events**: Only when website owner implements `window.op('track', 'custom_event')` method
+  - **No background tracking** - data is sent only for the specific interactions you've configured
+
+* **External endpoints used**:
+  - `https://openpanel.dev/op1.js` - Analytics tracking script (cached locally)
+  - `https://api.openpanel.dev/` - Analytics data collection API (proxied through your WordPress site)
+
+* **Legal Information**:
+  - Service Terms: https://openpanel.dev/terms
+  - Privacy Policy: https://openpanel.dev/privacy
+
+This integration is essential for the plugin's core functionality of providing website analytics. The plugin uses a proxy approach to serve requests through your own domain to improve reliability and avoid ad-blocker interference.
 
 == Changelog ==
 

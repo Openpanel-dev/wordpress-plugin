@@ -2,7 +2,7 @@
 /**
  * Plugin Name: OpenPanel
  * Description: Activate OpenPanel to start tracking your website.
- * Version: 1.0.0
+ * Version: 1.1.0
  * Author: OpenPanel
  * License: GPLv2 or later
  * Requires at least: 5.8
@@ -14,7 +14,7 @@
 if (!defined('ABSPATH')) { exit; }
 
 final class OP_WP_Proxy {
-    const VERSION = '1.0.0';
+    const VERSION = '1.1.0';
     const OPTION_KEY   = 'op_wp_proxy_settings';
     const TRANSIENT_JS = 'op_wp_op1_js';
     const OP_JS_URL    = 'https://openpanel.dev/op1.js';
@@ -39,6 +39,8 @@ final class OP_WP_Proxy {
             'sanitize_callback' => function($input) {
                 $out = [];
                 $out['client_id'] = isset($input['client_id']) ? sanitize_text_field($input['client_id']) : '';
+                $out['api_url'] = isset($input['api_url']) ? $this->sanitize_url_option($input['api_url']) : '';
+                $out['script_url'] = isset($input['script_url']) ? $this->sanitize_url_option($input['script_url']) : '';
                 $out['track_screen'] = !empty($input['track_screen']) ? 1 : 0;
                 $out['track_outgoing'] = !empty($input['track_outgoing']) ? 1 : 0;
                 $out['track_attributes'] = !empty($input['track_attributes']) ? 1 : 0;
@@ -47,7 +49,7 @@ final class OP_WP_Proxy {
         ]);
 
         add_settings_section('op_main', __('OpenPanel Settings', 'openpanel'), function() {
-            echo '<p>' . esc_html__('Set your OpenPanel Client ID. The SDK and requests are served from your domain to avoid ad blockers.', 'openpanel') . '</p>';
+            echo '<p>' . esc_html__('Set your OpenPanel Client ID. The SDK and requests are served from your domain to avoid ad blockers. Self-hosted instances can set a custom API URL below.', 'openpanel') . '</p>';
         }, self::OPTION_KEY);
 
         add_settings_field('client_id', __('Client ID', 'openpanel'), function() {
@@ -56,6 +58,30 @@ final class OP_WP_Proxy {
                 esc_attr(self::OPTION_KEY),
                 isset($opts['client_id']) ? esc_attr($opts['client_id']) : ''
             );
+        }, self::OPTION_KEY, 'op_main');
+
+        add_settings_field('api_url', __('API URL (optional)', 'openpanel'), function() {
+            $opts = get_option(self::OPTION_KEY);
+            $value = isset($opts['api_url']) ? $opts['api_url'] : '';
+            printf(
+                '<input type="url" name="%s[api_url]" value="%s" class="regular-text" placeholder="%s"/>',
+                esc_attr(self::OPTION_KEY),
+                esc_attr($value),
+                esc_attr(self::DEFAULT_API_BASE)
+            );
+            echo '<p class="description">' . esc_html__('Leave empty to use the hosted OpenPanel API. For self-hosted instances, enter the base URL of your OpenPanel API (e.g. https://analytics.example.com/api).', 'openpanel') . '</p>';
+        }, self::OPTION_KEY, 'op_main');
+
+        add_settings_field('script_url', __('Tracking script URL (optional)', 'openpanel'), function() {
+            $opts = get_option(self::OPTION_KEY);
+            $value = isset($opts['script_url']) ? $opts['script_url'] : '';
+            printf(
+                '<input type="url" name="%s[script_url]" value="%s" class="regular-text" placeholder="%s"/>',
+                esc_attr(self::OPTION_KEY),
+                esc_attr($value),
+                esc_attr(self::OP_JS_URL)
+            );
+            echo '<p class="description">' . esc_html__('Leave empty to use the OpenPanel CDN. For fully self-hosted setups, point this at your own copy of op1.js.', 'openpanel') . '</p>';
         }, self::OPTION_KEY, 'op_main');
 
         add_settings_field('toggles', __('Auto-tracking (optional)', 'openpanel'), function() {
@@ -84,6 +110,7 @@ final class OP_WP_Proxy {
         if (isset($_POST['op_clear_cache']) && current_user_can('manage_options')) {
             if (isset($_POST['_wpnonce']) && wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['_wpnonce'])), 'op_clear_cache_nonce')) {
                 delete_transient(self::TRANSIENT_JS);
+                delete_transient(self::TRANSIENT_JS . '_' . md5($this->get_script_url()));
                 add_action('admin_notices', function() {
                     echo '<div class="notice notice-success is-dismissible"><p>' . 
                          esc_html__('OpenPanel cache cleared successfully. The latest op1.js will be fetched on the next page load.', 'openpanel') . 
@@ -117,8 +144,9 @@ final class OP_WP_Proxy {
             
             <?php
             // Check if transient exists and get expiration info
-            $cached_js = get_transient(self::TRANSIENT_JS);
-            $timeout_option = '_transient_timeout_' . self::TRANSIENT_JS;
+            $cache_key = self::TRANSIENT_JS . '_' . md5($this->get_script_url());
+            $cached_js = get_transient($cache_key);
+            $timeout_option = '_transient_timeout_' . $cache_key;
             $cached_time = get_option($timeout_option);
             
             if ($cached_js !== false && $cached_time) {
@@ -147,6 +175,48 @@ final class OP_WP_Proxy {
         <?php
     }
 
+    /** ---------------- Effective URLs & sanitization ---------------- */
+
+    /**
+     * The API base URL the proxy forwards to.
+     * Precedence: filter > saved setting > hosted default (https://api.openpanel.dev/).
+     */
+    public function get_api_base_url() {
+        $opts = get_option(self::OPTION_KEY, []);
+        $url  = !empty($opts['api_url']) ? $opts['api_url'] : self::DEFAULT_API_BASE;
+        $url  = apply_filters('openpanel_api_url', $url);
+        return untrailingslashit($url);
+    }
+
+    /**
+     * The URL op1.js is loaded from (and cached/inlined from).
+     * Precedence: filter > saved setting > hosted default (https://openpanel.dev/op1.js).
+     */
+    public function get_script_url() {
+        $opts = get_option(self::OPTION_KEY, []);
+        $url  = !empty($opts['script_url']) ? $opts['script_url'] : self::OP_JS_URL;
+        return apply_filters('openpanel_script_url', $url);
+    }
+
+    /**
+     * Validate and normalize a URL setting. Returns '' for empty/invalid values
+     * so only http(s) URLs with a host can be stored.
+     */
+    private function sanitize_url_option($value) {
+        $value = trim((string) $value);
+        if ($value === '') {
+            return '';
+        }
+        $parsed = wp_parse_url($value);
+        if (!$parsed || empty($parsed['host']) || empty($parsed['scheme'])) {
+            return '';
+        }
+        if (!in_array(strtolower($parsed['scheme']), ['https', 'http'], true)) {
+            return '';
+        }
+        return untrailingslashit($value);
+    }
+
     /** ---------------- Inline SDK ---------------- */
     public function inject_inline_sdk() {
         if (is_admin()) return;
@@ -167,12 +237,15 @@ final class OP_WP_Proxy {
 
         $bootstrap = "(function(){window.op=window.op||function(){(window.op.q=window.op.q||[]).push(arguments)};window.op('init'," . wp_json_encode($init) . ");})();";
 
-        $op_js = get_transient(self::TRANSIENT_JS);
+        $script_url = $this->get_script_url();
+        $cache_key  = self::TRANSIENT_JS . '_' . md5($script_url);
+
+        $op_js = get_transient($cache_key);
         if ($op_js === false) {
-            $res = wp_remote_get(self::OP_JS_URL, ['timeout' => 8]);
+            $res = wp_remote_get($script_url, ['timeout' => 8]);
             if (!is_wp_error($res) && 200 === wp_remote_retrieve_response_code($res)) {
                 $op_js = wp_remote_retrieve_body($res);
-                set_transient(self::TRANSIENT_JS, $op_js, self::CACHE_TIMEOUT);
+                set_transient($cache_key, $op_js, self::CACHE_TIMEOUT);
             }
         }
 
@@ -187,10 +260,10 @@ final class OP_WP_Proxy {
                 wp_add_inline_script('op-inline-stub', $op_js, 'after');
             } else {
                 // Fall back to CDN if cached content appears invalid or unsafe
-                wp_enqueue_script('openpanel-op1', self::OP_JS_URL, [], self::VERSION, true);
+                wp_enqueue_script('openpanel-op1', $script_url, [], self::VERSION, true);
             }
         } else {
-            wp_enqueue_script('openpanel-op1', self::OP_JS_URL, [], self::VERSION, true);
+            wp_enqueue_script('openpanel-op1', $script_url, [], self::VERSION, true);
         }
     }
 
@@ -203,7 +276,7 @@ final class OP_WP_Proxy {
             // is required as this acts as a proxy for OpenPanel analytics collection.
             // 
             // Security measures in place:
-            // 1. Only proxies to whitelisted OpenPanel API endpoints (is_valid_proxy_target)
+            // 1. Only proxies to allowed OpenPanel API endpoints (hostname whitelist, see is_valid_proxy_target)
             // 2. All input data is sanitized and validated before forwarding
             // 3. Proper CORS headers are set for same-origin requests only
             // 4. No sensitive WordPress data is exposed through this endpoint
@@ -227,7 +300,7 @@ final class OP_WP_Proxy {
         }
 
         $path = ltrim($request->get_param('path') ?? '', '/');
-        $target = rtrim(self::DEFAULT_API_BASE, '/') . '/' . $path;
+        $target = rtrim($this->get_api_base_url(), '/') . '/' . $path;
         
         // Security: Ensure we only proxy to OpenPanel API endpoints
         if (!$this->is_valid_proxy_target($target)) {
@@ -318,17 +391,32 @@ final class OP_WP_Proxy {
     }
 
     private function is_valid_proxy_target($target) {
+        // Always allow the hosted OpenPanel endpoints, plus the configured
+        // (self-hosted) API host. Hostname list is extensible via filter.
         $allowed_hosts = [
             'api.openpanel.dev',
             'openpanel.dev'
         ];
-        
+
+        $api_parsed = wp_parse_url($this->get_api_base_url());
+        if ($api_parsed && !empty($api_parsed['host'])) {
+            $allowed_hosts[] = $api_parsed['host'];
+        }
+
+        /**
+         * Filter the hosts the proxy is allowed to forward to.
+         *
+         * @param string[] $allowed_hosts Hostnames the proxy may target.
+         */
+        $allowed_hosts = apply_filters('openpanel_proxy_allowed_hosts', $allowed_hosts);
+        $allowed_hosts = array_map('strtolower', array_unique($allowed_hosts));
+
         $parsed = wp_parse_url($target);
         if (!$parsed || !isset($parsed['host'])) {
             return false;
         }
-        
-        return in_array($parsed['host'], $allowed_hosts, true) && 
+
+        return in_array(strtolower($parsed['host']), $allowed_hosts, true) &&
                (empty($parsed['scheme']) || in_array($parsed['scheme'], ['https', 'http'], true));
     }
 

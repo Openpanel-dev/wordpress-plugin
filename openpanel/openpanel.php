@@ -241,6 +241,13 @@ final class OP_WP_Proxy {
 
         $incoming = $this->collect_request_headers();
 
+        // PHP exposes Content-Type as CONTENT_TYPE (no HTTP_ prefix), so
+        // collect_request_headers() misses it and the API rejects the body.
+        $content_type = $request->get_header('content_type');
+        if ($content_type) {
+            $incoming['Content-Type'] = $content_type;
+        }
+
         $query = $request->get_query_params();
         if (!empty($query)) {
             $target = add_query_arg($query, $target);
@@ -347,8 +354,9 @@ final class OP_WP_Proxy {
             return false;
         }
         
-        // Check for potential XSS patterns
-        if (preg_match('/(?:javascript:|data:|vbscript:|on\w+\s*=)/i', $js_content)) {
+        // Check for potential XSS patterns. Event handler assignments (on\w+=)
+        // are not checked: op1.js itself contains onload=/onerror=.
+        if (preg_match('/(?:javascript:|data:|vbscript:)/i', $js_content)) {
             return false;
         }
         

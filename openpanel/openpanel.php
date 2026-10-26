@@ -354,8 +354,9 @@ final class OP_WP_Proxy {
             return false;
         }
         
-        // Check for potential XSS patterns
-        if (preg_match('/(?:javascript:|data:|vbscript:|on\w+\s*=)/i', $js_content)) {
+        // Check for potential XSS patterns. Event handler assignments (on\w+=)
+        // are not checked: op1.js itself contains onload=/onerror=.
+        if (preg_match('/(?:javascript:|data:|vbscript:)/i', $js_content)) {
             return false;
         }
         

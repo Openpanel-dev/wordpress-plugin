@@ -241,6 +241,13 @@ final class OP_WP_Proxy {
 
         $incoming = $this->collect_request_headers();
 
+        // PHP exposes Content-Type as CONTENT_TYPE (no HTTP_ prefix), so
+        // collect_request_headers() misses it and the API rejects the body.
+        $content_type = $request->get_header('content_type');
+        if ($content_type) {
+            $incoming['Content-Type'] = $content_type;
+        }
+
         $query = $request->get_query_params();
         if (!empty($query)) {
             $target = add_query_arg($query, $target);
